@@ -55,46 +55,40 @@ def convert_pdf_page_to_image(pdf_data: bytes, page_num: int, dpi: int = 200) ->
     finally:
         pdf_document.close()
 
-@app.get("/pdf-to-images/{pdf_url:path}")
-async def convert_pdf_to_images(pdf_url: str, dpi: int = 200):
+@app.get("/pdf-images/{pdf_url:path}")
+async def get_pdf_images_info(pdf_url: str):
     """
-    Convert PDF to array of image streams
-    - pdf_url: URL of the PDF to convert
-    - dpi: Resolution quality (150-300 recommended)
+    Returns PDF metadata and individual image URLs
     """
-    try:
-        # Download PDF
-        pdf_data = await download_pdf(pdf_url)
-        
-        # Get basic PDF info
-        pdf_document = fitz.open(stream=pdf_data, filetype="pdf")
-        page_count = len(pdf_document)
-        pdf_document.close()
-        
-        # Convert each page to image
-        image_streams = []
-        for page_num in range(page_count):
-            image_buffer = convert_pdf_page_to_image(pdf_data, page_num, dpi)
-            image_streams.append(image_buffer)
-        
-        return {
-            "page_count": page_count,
-            "images": [
-                {"page_number": i, "stream_available": True} 
-                for i in range(len(image_streams))
-            ]
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+    pdf_data = await download_pdf(pdf_url)
+    pdf_document = fitz.open(stream=pdf_data, filetype="pdf")
+    page_count = len(pdf_document)
+    pdf_document.close()
+    
+    # Return URLs to individual image endpoints
+    return {
+        "page_count": page_count,
+        "images": [
+            {
+                "page_number": i,
+                "url": f"/get-image/{pdf_url}?page={i}",
+                "download_url": f"/get-image/{pdf_url}?page={i}&download=true"
+            }
+            for i in range(page_count)
+        ]
+    }
 
 @app.get("/get-image/{pdf_url:path}")
-async def get_single_image(pdf_url: str, page: int = 0, dpi: int = 200):
+async def get_single_image(pdf_url: str, page: int = 0, dpi: int = 200, download: bool = False):
     """Get single PDF page as image stream"""
     pdf_data = await download_pdf(pdf_url)
     image_buffer = convert_pdf_page_to_image(pdf_data, page, dpi)
     
+    filename = f"page_{page+1}.jpg"
+    headers = {"Content-Disposition": f"{'attachment' if download else 'inline'}; filename={filename}"}
+    
     return StreamingResponse(
         image_buffer,
         media_type="image/jpeg",
-        headers={"Content-Disposition": f"inline; filename=page_{page}.jpg"}
+        headers=headers
     )
