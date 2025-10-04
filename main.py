@@ -1,94 +1,120 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
-import fitz  # PyMuPDF
-import io
+from pydantic import BaseModel, HttpUrl
 import requests
-from PIL import Image
-import asyncio
-import aiohttp
+from pdf2image import convert_from_bytes
+import base64
+from io import BytesIO
+from typing import List, Optional
+import re
 
-app = FastAPI()
+app = FastAPI(title="PDF to Images Converter", version="1.0.0")
 
-async def download_pdf(pdf_url: str) -> bytes:
-    """Download PDF from URL asynchronously"""
-    async with aiohttp.ClientSession() as session:
-        async with session.get(pdf_url) as response:
-            if response.status != 200:
-                raise HTTPException(status_code=400, detail="Failed to download PDF")
-            return await response.read()
+class PDFRequest(BaseModel):
+    page_range: str  # Format: "1-3,5,7-9"
+    url: HttpUrl
+    dpi: int = 200
 
-def convert_pdf_page_to_image(pdf_data: bytes, page_num: int, dpi: int = 200) -> io.BytesIO:
-    """Convert a single PDF page to high-quality image"""
-    # Open PDF document from memory
-    pdf_document = fitz.open(stream=pdf_data, filetype="pdf")
+class PDFResponse(BaseModel):
+    images: List[str]  # List of base64 encoded images
+    total_pages_processed: int
+    pages: List[int]   # Actual page numbers processed
+
+def parse_page_range(page_range: str, max_pages: int) -> List[int]:
+    """
+    Parse page range string like "1-3,5,7-9" into list of page numbers
+    Pages are 1-indexed in input, but we convert to 0-indexed for internal use
+    """
+    pages = set()
     
+    # Remove spaces and split by comma
+    parts = page_range.replace(' ', '').split(',')
+    
+    for part in parts:
+        if '-' in part:
+            # Range like "1-3"
+            start_end = part.split('-')
+            if len(start_end) != 2:
+                raise ValueError(f"Invalid range: {part}")
+            
+            try:
+                start = int(start_end[0])
+                end = int(start_end[1])
+            except ValueError:
+                raise ValueError(f"Invalid numbers in range: {part}")
+            
+            if start < 1 or end > max_pages or start > end:
+                raise ValueError(f"Range {part} out of valid bounds (1-{max_pages})")
+            
+            pages.update(range(start, end + 1))
+        else:
+            # Single page
+            try:
+                page = int(part)
+            except ValueError:
+                raise ValueError(f"Invalid page number: {part}")
+            
+            if page < 1 or page > max_pages:
+                raise ValueError(f"Page {page} out of valid bounds (1-{max_pages})")
+            
+            pages.add(page)
+    
+    return sorted(pages)
+
+@app.post("/convert-pdf", response_model=PDFResponse)
+async def convert_pdf_to_images(request: PDFRequest):
     try:
-        if page_num >= len(pdf_document):
-            raise HTTPException(status_code=404, detail=f"Page {page_num} not found")
+        # Download PDF
+        response = requests.get(str(request.url))
+        response.raise_for_status()
         
-        # Get the page
-        page = pdf_document[page_num]
+        pdf_bytes = response.content
         
-        # Create high-resolution matrix for rendering
-        zoom = dpi / 72  # PDF default is 72 DPI
-        mat = fitz.Matrix(zoom, zoom)
+        # First, convert all pages to get total page count
+        all_pages = convert_from_bytes(pdf_bytes, dpi=request.dpi)
+        total_pages = len(all_pages)
         
-        # Render page to pixmap
-        pix = page.get_pixmap(matrix=mat)
+        # Parse page range
+        requested_pages = parse_page_range(request.page_range, total_pages)
         
-        # Convert to PIL Image for quality control
-        img_data = pix.tobytes("ppm")
-        img = Image.open(io.BytesIO(img_data))
+        if not requested_pages:
+            raise HTTPException(status_code=400, detail="No valid pages in the specified range")
         
-        # Convert to RGB if necessary (remove alpha channel)
-        if img.mode in ('RGBA', 'LA'):
-            background = Image.new('RGB', img.size, (255, 255, 255))
-            background.paste(img, mask=img.split()[-1])
-            img = background
+        # Convert only the requested pages
+        # Note: pdf2page uses 0-indexed pages, but our input is 1-indexed
+        pages_to_convert = [page - 1 for page in requested_pages]
+        images = convert_from_bytes(
+            pdf_bytes, 
+            dpi=request.dpi, 
+            first_page=min(pages_to_convert) + 1,  # pdf2image uses 1-indexed for first_page/last_page
+            last_page=max(pages_to_convert) + 1,
+            fmt='PNG'
+        )
         
-        # Save as high-quality JPEG to bytes buffer
-        output_buffer = io.BytesIO()
-        img.save(output_buffer, format='JPEG', quality=95, optimize=True)
-        output_buffer.seek(0)
+        # Convert images to base64
+        base64_images = []
+        for img in images:
+            buffered = BytesIO()
+            img.save(buffered, format="PNG")
+            img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+            base64_images.append(img_base64)
         
-        return output_buffer
-    finally:
-        pdf_document.close()
+        return PDFResponse(
+            images=base64_images,
+            total_pages_processed=len(base64_images),
+            pages=requested_pages
+        )
+        
+    except requests.RequestException as e:
+        raise HTTPException(status_code=400, detail=f"Failed to download PDF: {str(e)}")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-@app.get("/pdf-images/{pdf_url:path}")
-async def get_pdf_images_info(pdf_url: str):
-    """
-    Returns PDF metadata and individual image URLs
-    """
-    pdf_data = await download_pdf(pdf_url)
-    pdf_document = fitz.open(stream=pdf_data, filetype="pdf")
-    page_count = len(pdf_document)
-    pdf_document.close()
-    
-    # Return URLs to individual image endpoints
-    return {
-        "page_count": page_count,
-        "images": [
-            {
-                "page_number": i,
-                "url": f"/get-image/{pdf_url}?page={i}",
-                "download_url": f"/get-image/{pdf_url}?page={i}&download=true"
-            }
-            for i in range(page_count)
-        ]
-    }
+@app.get("/")
+async def root():
+    return {"message": "PDF to Images Converter API", "version": "1.0.0"}
 
-@app.get("/get-image/{pdf_url:path}")
-async def get_single_image(pdf_url: str, page: int = 0, dpi: int = 200, download: bool = False):
-    """Get single PDF page as image stream"""
-    pdf_data = await download_pdf(pdf_url)
-    image_buffer = convert_pdf_page_to_image(pdf_data, page, dpi)
-    
-    filename = f"page_{page+1}.jpg"
-    headers = {"Content-Disposition": f"{'attachment' if download else 'inline'}; filename={filename}"}
-    
-    return StreamingResponse(
-        image_buffer,
-        media_type="image/jpeg",
-        headers=headers
-    )
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy"}
