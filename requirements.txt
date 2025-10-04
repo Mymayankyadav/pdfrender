@@ -1,6 +1,6 @@
 fastapi
-uvicorn[standard]
-PyMuPDF
-pillow
-aiohttp
+uvicorn
+python-multipart
 requests
+pdf2image
+pillow
