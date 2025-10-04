@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+PyMuPDF
+pillow
+aiohttp
+requests
