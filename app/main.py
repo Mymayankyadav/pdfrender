@@ -7,7 +7,25 @@ from io import BytesIO
 from typing import List, Optional
 import re
 
+# Make sure to import this middleware
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI(title="PDF to Images Converter", version="1.0.0")
+
+origins = [
+    # You can be more specific here for production,
+    # but "*" is fine for development.
+    "*"
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"], # Allows all methods
+    allow_headers=["*"], # Allows all headers
+)
+
 
 class PDFRequest(BaseModel):
     page_range: str  # Format: "1-3,5,7-9"
