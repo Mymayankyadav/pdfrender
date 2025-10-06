@@ -1,6 +1,9 @@
 fastapi
-uvicorn
-python-multipart
+uvicorn[standard]
+pydantic
 requests
-pdf2image
+pymupdf
 pillow
+python-multipart
+python-dotenv
+aiofiles
